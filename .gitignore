@@ -1,0 +1,11 @@
+# Windows
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Temporary / Log files
+*.log
+*.tmp
+# Editor
+.vstags
+*.code-workspace
