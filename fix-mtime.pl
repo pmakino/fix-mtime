@@ -555,34 +555,51 @@ sub get_mtime_by_7z
 	my $file = shift;
 	my $mtime;
 	eval {
-		my $long_file = to_long_path($file);
+		my ($type, $t) = list_7z($file, 0);
 		# 圧縮された tar (tar.gz / tar.bz2 / tar.xz / tgz / tbz / txz) は、そのまま一覧すると tar 1 個としか見えない。
 		# そのため 1 個目の 7z で展開して標準出力に流し、2 個目の 7z で tar の中身（メンバー）を一覧する。
-		my $nested = $file =~ /\.(tgz|tbz|txz)$|\.tar\.(gz|bz2|xz)$/i;
-		my $cmd;
-		if (!$IS_WIN) {
-			# シェルを経由するため、パスは単一引用符で囲んで UTF-8 のバイト列で渡す
-			my $quote = sub { my $s = shift; $s =~ s/'/'\\''/g; "'$s'" };
-			my $z = $quote->($SEVEN_ZIP);
-			my $path = $quote->(native_path($long_file));
-			$cmd = $nested
-				? "$z x -so -- $path 2>/dev/null | $z l -slt -ttar -si -sccUTF-8 2>/dev/null"
-				: "$z l -slt -sccUTF-8 -- $path 2>/dev/null";
+		# 拡張子と実際の形式が違うことがある（tar.gz なのに無圧縮の tar 等）ため、7z が判定した形式で判断する。
+		if ($file =~ /\.(tgz|tbz|txz)$|\.tar\.(gz|bz2|xz)$/i && defined $type && $type =~ /^(gzip|bzip2|xz)$/i) {
+			(undef, $t) = list_7z($file, 1);
 		}
-		elsif (is_cp932_safe($long_file . $SEVEN_ZIP)) {
-			my $enc_file = encode("cp932", $long_file);
-			$cmd = $nested
-				? qq{"$SEVEN_ZIP" x -so "$enc_file" 2>nul | "$SEVEN_ZIP" l -slt -ttar -si -sccUTF-8 2>nul}
-				: qq{"$SEVEN_ZIP" l -slt -sccUTF-8 "$enc_file" 2>nul};
-		}
-		else {
-			# cp932 で表せない文字を含むパスはコマンドラインで渡せないため、
-			# 引数を UTF-16 で渡せる PowerShell 経由で実行する（パスは環境変数に Base64 で格納）
-			# tar のパイプは PowerShell 内では扱えない（バイナリが壊れる）ため、cmd.exe に任せる
-			$ENV{FIX_MTIME_TARGET_FILE_B64} = encode_base64(encode("UTF-8", $long_file), "");
-			$ENV{FIX_MTIME_7Z_B64} = encode_base64(encode("UTF-8", $SEVEN_ZIP), "");
-			$ENV{FIX_MTIME_NESTED} = $nested ? "1" : "0";
-			my $script = <<'PS';
+		$mtime = $t if $t;
+	};
+	if ($@) {
+		say("ERROR: $@");
+	}
+	return $mtime;
+}
+
+# 7z l -slt でアーカイブを一覧し、(7z が判定した形式, メンバーの最新の更新日) を返す。
+# $nested が真なら、圧縮された tar を展開して流し込み、tar の中身を一覧する。
+sub list_7z
+{
+	my ($file, $nested) = @_;
+	my $long_file = to_long_path($file);
+	my $cmd;
+	if (!$IS_WIN) {
+		# シェルを経由するため、パスは単一引用符で囲んで UTF-8 のバイト列で渡す
+		my $quote = sub { my $s = shift; $s =~ s/'/'\\''/g; "'$s'" };
+		my $z = $quote->($SEVEN_ZIP);
+		my $path = $quote->(native_path($long_file));
+		$cmd = $nested
+			? "$z x -so -- $path 2>/dev/null | $z l -slt -ttar -si -sccUTF-8 2>/dev/null"
+			: "$z l -slt -sccUTF-8 -- $path 2>/dev/null";
+	}
+	elsif (is_cp932_safe($long_file . $SEVEN_ZIP)) {
+		my $enc_file = encode("cp932", $long_file);
+		$cmd = $nested
+			? qq{"$SEVEN_ZIP" x -so "$enc_file" 2>nul | "$SEVEN_ZIP" l -slt -ttar -si -sccUTF-8 2>nul}
+			: qq{"$SEVEN_ZIP" l -slt -sccUTF-8 "$enc_file" 2>nul};
+	}
+	else {
+		# cp932 で表せない文字を含むパスはコマンドラインで渡せないため、
+		# 引数を UTF-16 で渡せる PowerShell 経由で実行する（パスは環境変数に Base64 で格納）
+		# tar のパイプは PowerShell 内では扱えない（バイナリが壊れる）ため、cmd.exe に任せる
+		$ENV{FIX_MTIME_TARGET_FILE_B64} = encode_base64(encode("UTF-8", $long_file), "");
+		$ENV{FIX_MTIME_7Z_B64} = encode_base64(encode("UTF-8", $SEVEN_ZIP), "");
+		$ENV{FIX_MTIME_NESTED} = $nested ? "1" : "0";
+		my $script = <<'PS';
 $u = New-Object System.Text.UTF8Encoding $false
 [Console]::OutputEncoding = $u
 $f = $u.GetString([Convert]::FromBase64String($env:FIX_MTIME_TARGET_FILE_B64))
@@ -601,36 +618,33 @@ if ($env:FIX_MTIME_NESTED -eq '1') {
     & $z l -slt -sccUTF-8 $f 2>$null
 }
 PS
-			my $enc_script = encode_base64(encode("UTF-16LE", $script), "");
-			$cmd = qq{powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $enc_script 2>nul};
-		}
-		my $pid = open(my $fh, "-|", $cmd);
-		unless ($pid) {
-			die "7z コマンドの実行に失敗しました: $!";
-		}
-		binmode $fh, ":encoding(utf8)";
-		my $in_files = 0;
-		my $maxtime = 0;
-		while (my $line = <$fh>) {
-			$line =~ s/[\r\n]+$//;
-			if ($line =~ /^----------/) {
-				$in_files = 1;
-				next;
-			}
-			if ($in_files && $line =~ /^Modified\s*=\s*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})/) {
-				my $t = str2time($1);
-				if ($t && $t > $maxtime) {
-					$maxtime = $t;
-				}
-			}
-		}
-		close $fh;
-		$mtime = $maxtime if $maxtime > 0;
-	};
-	if ($@) {
-		say("ERROR: $@");
+		my $enc_script = encode_base64(encode("UTF-16LE", $script), "");
+		$cmd = qq{powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $enc_script 2>nul};
 	}
-	return $mtime;
+	my $pid = open(my $fh, "-|", $cmd);
+	unless ($pid) {
+		die "7z コマンドの実行に失敗しました: $!";
+	}
+	binmode $fh, ":encoding(utf8)";
+	my ($type, $in_files, $maxtime) = (undef, 0, 0);
+	while (my $line = <$fh>) {
+		$line =~ s/[\r\n]+$//;
+		if ($line =~ /^----------/) {
+			$in_files = 1;
+			next;
+		}
+		if (!$in_files && !defined $type && $line =~ /^Type\s*=\s*(\S+)/) {
+			$type = $1;
+		}
+		if ($in_files && $line =~ /^Modified\s*=\s*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})/) {
+			my $t = str2time($1);
+			if ($t && $t > $maxtime) {
+				$maxtime = $t;
+			}
+		}
+	}
+	close $fh;
+	return ($type, $maxtime > 0 ? $maxtime : undef);
 }
 
 # MSG (Outlookアイテム) ファイル中の受信日時または送信日時を得る
