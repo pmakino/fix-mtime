@@ -115,7 +115,16 @@ sub fm_stat {
 
 sub fm_utime {
 	my ($time, $path) = @_;
-	return Win32::LongPath::utimeL($time, $time, $path) if $IS_WIN;
+	if ($IS_WIN) {
+		return 1 if Win32::LongPath::utimeL($time, $time, $path);
+		# 読み取り専用属性が付いていると更新日時を設定できないため、一時的に外して設定し、元に戻す
+		my $stat = Win32::LongPath::statL($path);
+		return 0 unless $stat && ($stat->{attribs} & Win32::LongPath::FILE_ATTRIBUTE_READONLY());
+		Win32::LongPath::attribL("-r", $path) or return 0;
+		my $ok = Win32::LongPath::utimeL($time, $time, $path);
+		Win32::LongPath::attribL("+r", $path);
+		return $ok;
+	}
 	return utime($time, $time, native_path($path));
 }
 
