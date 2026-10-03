@@ -11,7 +11,8 @@ Windows ではフォルダーやファイルをバッチファイルにドラッ
 | 種類 | 日時の取得元 |
 |---|---|
 | zip / epub / appx / msix / appxbundle / msixbundle / ipa / jar / `.zip.mp3` | 中身のメンバーの最新更新日時 |
-| 7z / rar / cab / lzh / lha / tar / tgz / tbz / txz / gz / bz2 / xz | 7-Zip で一覧した中身の最新更新日時 |
+| 7z / rar / cab / lzh / lha / tar / gz | 7-Zip で一覧した中身の最新更新日時 |
+| tar.gz / tar.bz2 / tar.xz / tgz / tbz / txz | 7-Zip で展開して tar の中身(ファイルとフォルダー)を一覧し、その最新更新日時 |
 | iso | ISO9660 のボリューム更新日時 |
 | eml | 最初の `Received` ヘッダー、なければ `Date` ヘッダー |
 | msg | 受信日時、送信日時、作成日時、変更日時の順(MAPI プロパティ) |

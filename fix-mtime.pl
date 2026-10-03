@@ -301,7 +301,7 @@ sub procfile
 {
 	my $path = shift;
 	local $_ = $path;
-	if (/\.(zip|epub|appx|msix|appxbundle|msixbundle|ipa|jar|iso|eml|msg|exe|msi|pdf|doc|xls|ppt|docx|xlsx|xlsm|pptx|pptm|ppsx|mp4|mkv|mov|wmv|avi|mp3|heic|jpe?g|png|gif|rm|rtf|flv|7z|rar|cab|lzh|lha|tar|tgz|tbz|txz|gz|bz2|xz)$|\.tar\.(gz|bz2|xz)$|\.zip\.mp3$/i) {
+	if (/\.(zip|epub|appx|msix|appxbundle|msixbundle|ipa|jar|iso|eml|msg|exe|msi|pdf|doc|xls|ppt|docx|xlsx|xlsm|pptx|pptm|ppsx|mp4|mkv|mov|wmv|avi|mp3|heic|jpe?g|png|gif|rm|rtf|flv|7z|rar|cab|lzh|lha|tar|tgz|tbz|txz|gz)$|\.tar\.(gz|bz2|xz)$|\.zip\.mp3$/i) {
 		say($path);
 		my $stat = fm_stat($path);
 		if ($stat) {
@@ -310,7 +310,7 @@ sub procfile
 			if (/\.(zip|epub|appx|msix|appxbundle|msixbundle|ipa|jar)$|\.zip\.mp3$/i) {
 				$mtime = get_mtime_by_zip_members($path);
 			}
-			elsif (/\.(7z|rar|cab|lzh|lha|tar|tgz|tbz|txz|gz|bz2|xz)$|\.tar\.(gz|bz2|xz)$/i) {
+			elsif (/\.(7z|rar|cab|lzh|lha|tar|tgz|tbz|txz|gz)$|\.tar\.(gz|bz2|xz)$/i) {
 				if ($SEVEN_ZIP) {
 					$mtime = get_mtime_by_7z($path);
 				}
@@ -556,27 +556,50 @@ sub get_mtime_by_7z
 	my $mtime;
 	eval {
 		my $long_file = to_long_path($file);
+		# 圧縮された tar (tar.gz / tar.bz2 / tar.xz / tgz / tbz / txz) は、そのまま一覧すると tar 1 個としか見えない。
+		# そのため 1 個目の 7z で展開して標準出力に流し、2 個目の 7z で tar の中身（メンバー）を一覧する。
+		my $nested = $file =~ /\.(tgz|tbz|txz)$|\.tar\.(gz|bz2|xz)$/i;
 		my $cmd;
 		if (!$IS_WIN) {
-				# シェルを経由するため、パスは単一引用符で囲んで UTF-8 のバイト列で渡す
-				my $quote = sub { my $s = shift; $s =~ s/'/'\\''/g; "'$s'" };
-				$cmd = join(" ", $quote->($SEVEN_ZIP), "l", "-slt", "-sccUTF-8", "--", $quote->(native_path($long_file))) . " 2>/dev/null";
-			}
-			elsif (is_cp932_safe($long_file . $SEVEN_ZIP)) {
+			# シェルを経由するため、パスは単一引用符で囲んで UTF-8 のバイト列で渡す
+			my $quote = sub { my $s = shift; $s =~ s/'/'\\''/g; "'$s'" };
+			my $z = $quote->($SEVEN_ZIP);
+			my $path = $quote->(native_path($long_file));
+			$cmd = $nested
+				? "$z x -so -- $path 2>/dev/null | $z l -slt -ttar -si -sccUTF-8 2>/dev/null"
+				: "$z l -slt -sccUTF-8 -- $path 2>/dev/null";
+		}
+		elsif (is_cp932_safe($long_file . $SEVEN_ZIP)) {
 			my $enc_file = encode("cp932", $long_file);
-			$cmd = qq{"$SEVEN_ZIP" l -slt -sccUTF-8 "$enc_file" 2>nul};
+			$cmd = $nested
+				? qq{"$SEVEN_ZIP" x -so "$enc_file" 2>nul | "$SEVEN_ZIP" l -slt -ttar -si -sccUTF-8 2>nul}
+				: qq{"$SEVEN_ZIP" l -slt -sccUTF-8 "$enc_file" 2>nul};
 		}
 		else {
 			# cp932 で表せない文字を含むパスはコマンドラインで渡せないため、
 			# 引数を UTF-16 で渡せる PowerShell 経由で実行する（パスは環境変数に Base64 で格納）
+			# tar のパイプは PowerShell 内では扱えない（バイナリが壊れる）ため、cmd.exe に任せる
 			$ENV{FIX_MTIME_TARGET_FILE_B64} = encode_base64(encode("UTF-8", $long_file), "");
 			$ENV{FIX_MTIME_7Z_B64} = encode_base64(encode("UTF-8", $SEVEN_ZIP), "");
+			$ENV{FIX_MTIME_NESTED} = $nested ? "1" : "0";
 			my $script = <<'PS';
 $u = New-Object System.Text.UTF8Encoding $false
 [Console]::OutputEncoding = $u
 $f = $u.GetString([Convert]::FromBase64String($env:FIX_MTIME_TARGET_FILE_B64))
 $z = $u.GetString([Convert]::FromBase64String($env:FIX_MTIME_7Z_B64))
-& $z l -slt -sccUTF-8 $f 2>$null
+if ($env:FIX_MTIME_NESTED -eq '1') {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = 'cmd.exe'
+    $psi.Arguments = '/s /c ""' + $z + '" x -so "' + $f + '" 2>nul | "' + $z + '" l -slt -ttar -si -sccUTF-8 2>nul"'
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.StandardOutputEncoding = $u
+    $p = [System.Diagnostics.Process]::Start($psi)
+    $p.StandardOutput.ReadToEnd()
+    $p.WaitForExit()
+} else {
+    & $z l -slt -sccUTF-8 $f 2>$null
+}
 PS
 			my $enc_script = encode_base64(encode("UTF-16LE", $script), "");
 			$cmd = qq{powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $enc_script 2>nul};
